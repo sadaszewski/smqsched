@@ -87,7 +87,8 @@ this fact doesn't have to be stated explicitly, the framework will ensure it hap
 at the same time allowing for only one acquisition task at a time, while keeping the computation tasks
 running in parallel. This is also the reason for the previous point of planning execution in such an
 order that the final output starts coming in as soon as possible. It can be restated in other words -
-since **smqsched** runs multiple queues it tries to keep them all full at all times.
+since **smqsched** runs multiple queues it tries to keep them all full at all times and prioritizes
+delivering data to most recently added tasks in case of congestion.
 
 ### Support progressive task output
 
@@ -100,7 +101,7 @@ Therefore **smqsched** supports generators as tasks. The following example illus
 def _find_minima(x):
   yield False
   for i in range(1, len(x) - 1):  
-    if x[i] < x[i - 1] and x[i] < x[x + 1]:
+    if x[i] < x[i - 1] and x[i] < x[i + 1]:
       yield True
     else:
       yield False
