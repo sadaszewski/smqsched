@@ -4,7 +4,6 @@
 
 from threading import Thread, RLock, Condition
 from concurrent.futures import ThreadPoolExecutor
-	# ProcessPoolExecutor
 import os
 import time
 import numpy as np
@@ -16,26 +15,21 @@ _WAITING = 0
 _RUNNING = 1
 _FINISHED = 2
 _FAILED = 3
-# _HOLDING = 4
 
-print('cpu_count():', cpu_count())
 
 class Scheduler(object):
 	def __init__(self):
 		self._q = []
-		self._lock = RLock()
-		self._cond = Condition(self._lock)
+		self._cond = Condition()
 		self._queues = []
 		self._keep_running = False
 		self._thr = None
 		
 	def _try_start_job(self, job):
 		if job._status == _WAITING:	
-			# print('job._parents:', job._parents)
 			deps_ready = all(map(lambda par: \
 				par._status == _FINISHED, \
 				job._parents))
-			# print('deps_ready:', deps_ready)
 			if deps_ready:
 				if job._queue.has_resources(job):
 					job._queue.start(job)
@@ -45,17 +39,11 @@ class Scheduler(object):
 				self._try_start_job(par)
 				
 	def _try_start(self):
-		# print('try_start(): ENTER')
-		# t_1 = time.time()
-		# print('elapsed 1:', time.time() - t_1)
 		for job in reversed(self._q):
 			self._try_start_job(job)
-		# print('try_start(): EXIT')
 		
 	def add_job(self, job):
-		t_1 = time.time()
-		with self._lock:
-			# print('elapsed 2:', time.time() - t_1)
+		with self._cond:
 			self._q.append(job)
 
 	def _start(self):
@@ -71,32 +59,18 @@ class Scheduler(object):
 				all_done = all(map(lambda job: \
 					job._status == _FINISHED, \
 					self._q))
-				# print('all_done:', all_done)
 				if all_done:
 					break
 					
 				self._try_start()
-				# for queue in self._queues:
-					# print('max_workers: %d, used_workers: %d' % \
-						# (queue._max_workers, queue._used_workers))
-				t_1 = time.time()
-				# return
 				self._cond.wait()
-				# print('elapsed waiting for any job to complete:', time.time() - t_1)
 		
 	def start(self):
-		print('Starting...')
 		self._thr = Thread(target=self._start)
 		self._thr.start()
-		# try:
-			# self._start()
-		# except KeyboardInterrupt:
-			# print('Got kbd interrupt, shutting down...')
-			# os._exit(-1)
 			
 	def stop(self):
 		with self._cond:
-			print('Stop requested...')
 			self._keep_running = False
 			self._cond.notify()
 			
@@ -115,7 +89,6 @@ def _mklist(a):
 		
 class Job(object):
 	def __init__(self, queue, runnable, *args, **kwargs):
-		# print('Job(), args:', args)
 		self._queue = queue
 		self._parents = []
 		self._children = []
@@ -123,22 +96,18 @@ class Job(object):
 		self._args = args
 		self._status = _WAITING
 		self._result = None
-		# self._promise = None
+		self._promise = None
 		self._sub_jobs = None
 		for a in args:
 			if isinstance(a, Job):
 				self.add_dependency(a)
 		self._resources = (kwargs['resources'] if 'resources' in kwargs else {})
-		# self._orig_queue = queue
 		self._hold = (kwargs['hold'] if 'hold' in kwargs else False)
 		self._release = _mklist(kwargs['release'] if 'release' in kwargs else [])
-		# self._forward_to = (kwargs['forward_to'] if 'forward_to' in kwargs else None)
 		for rj in self._release:
 			self.add_dependency(rj)
 		if 'after' in kwargs:
-			after = _mklist(kwargs['after'])
-			# if not isinstance(after, Iterable): after = [after]
-			for a in after:
+			for a in _mklist(kwargs['after']):
 				self.add_dependency(a)
 		
 	def add_dependency(self, par):
@@ -156,11 +125,7 @@ class Job(object):
 		
 	def result(self):
 		return self._result
-		
-	def release(self):
-		if self._state == _HOLDING:
-			self._state = _FINISHED
-		
+				
 		
 class Queue(object):
 	def __init__(self, sch, **kwargs):
@@ -172,11 +137,7 @@ class Queue(object):
 		self._resources = kwargs['resources'] \
 			if 'resources' in kwargs else {}
 		self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
-		
-	# def has_free_workers(self):
-		# with self._sch._lock:
-			# return (self._used_workers < self._max_workers)
-		
+				
 	def submit(self, runnable, *args, **kwargs):
 		job = Job(self, runnable, *args, **kwargs)
 		self._sch.add_job(job)
@@ -195,7 +156,6 @@ class Queue(object):
 		
 	def wrap(self, job):
 		def wrapped(*args):
-			# print('wrapped(): ENTER, args:', args)
 			cond = self._sch._cond
 			
 			if job._sub_jobs is not None: # multiple result job
@@ -224,52 +184,30 @@ class Queue(object):
 					res = None
 					sta = _FAILED
 			
-			t_1 = time.time()
 			with cond:
-				elapsed = time.time() - t_1
-				# print('elapsed:', elapsed)
 				for rj in job._release:
-					rj._queue.free_resources(rj) # rj._orig_queue._used_workers -= 1
+					rj._queue.free_resources(rj)
 				if not job._hold:
-					self.free_resources(job) # self._used_workers -= 1
+					self.free_resources(job)
 				job._status = sta
 				job._result = res
 				cond.notify()
 			
-			# print('wrapped(): EXIT')
 			return res
+			
 		return wrapped
 		
 	def start(self, job):
-		t_1 = time.time()
-		with self._sch._lock:
-			# print('elapsed 3:', time.time() - t_1)
-			# if not self.has_free_workers(): # _used_workers >= self._max_workers:
-				# raise ValueError('Attempting to start a job on full queue')
+		with self._sch._cond:
 			if not self.has_resources(job):
 				raise ValueError('Attempting to start a job on a queue without necessary resources')
-			# if job._forward_to is not None:
-				# job._orig_queue = job._queue
-				# job._queue = job._forward_to
-				# job._forward_to = None
-				# if job._hold:
-					# self.take_resources(job) # _used_workers += 1
-					# job._hold = False
-			# else:
-				# if job._hold:
-					# job._orig_queue._used_workers += 1
 			job._status = _RUNNING
-			self.take_resources(job) # self._used_workers += 1
-			t_1 = time.time()
+			self.take_resources(job)
 			job._promise = self._executor.submit(self.wrap(job), *job.extract_args())
-			# print('elapsed 4:', time.time() - t_1)
 				
 	def has_resources(self, job):
 		if self._used_workers >= self._max_workers:
 			return False
-			
-		if job._resources is None:
-			return True
 			
 		for (k, v) in job._resources.items():
 			if self._resources[k] < v:
@@ -287,35 +225,6 @@ class Queue(object):
 		for (k, v) in job._resources.items():
 			self._resources[k] += v
 		
-		
-class Executor(object):
-	def __init__(self):
-		pass
-		
-	def submit(self, runnable, *args):
-		thr = Thread(target=runnable, args=args)
-		thr.start()
-		
-		
-class AcquisitionQueue(Queue):
-	def __init__(self, sch):
-		super(AcquisitionQueue, self).__init__(sch)
-		self._max_workers = 1
-		self._executor = ThreadPoolExecutor(max_workers=1)
-		
-	def hline(pos, width=0):
-		pass
-		
-	def vline(pos, width=0):
-		pass
-		
-		
-class ProcessingQueue(Queue):
-	def __init__(self, sch):
-		super(ProcessingQueue, self).__init__(sch)
-		self._max_workers = 8
-		self._executor = ThreadPoolExecutor(max_workers=8)
-
 		
 def _compute_square(i):
 	print('_compute_square(), i:', i)
@@ -347,8 +256,8 @@ _duplicate.number_of_results = lambda a: 3
 def main(): # a bunch of simple tests
 
 	sch = Scheduler()
-	acq = AcquisitionQueue(sch)
-	prq = ProcessingQueue(sch)
+	acq = Queue(sch, max_workers=1)
+	prq = Queue(sch)
 
 	n = 10
 	squares = [None] * n
