@@ -9,6 +9,7 @@ import os
 import time
 import numpy as np
 from collections import Iterable
+from multiprocessing import cpu_count
 
 
 _WAITING = 0
@@ -17,6 +18,7 @@ _FINISHED = 2
 _FAILED = 3
 # _HOLDING = 4
 
+print('cpu_count():', cpu_count())
 
 class Scheduler(object):
 	def __init__(self):
@@ -35,7 +37,7 @@ class Scheduler(object):
 				job._parents))
 			# print('deps_ready:', deps_ready)
 			if deps_ready:
-				if job._queue.has_free_workers():
+				if job._queue.has_resources(job):
 					job._queue.start(job)
 				return
 				
@@ -43,12 +45,12 @@ class Scheduler(object):
 				self._try_start_job(par)
 				
 	def _try_start(self):
-		print('try_start(): ENTER')
+		# print('try_start(): ENTER')
 		# t_1 = time.time()
 		# print('elapsed 1:', time.time() - t_1)
 		for job in reversed(self._q):
 			self._try_start_job(job)
-		print('try_start(): EXIT')
+		# print('try_start(): EXIT')
 		
 	def add_job(self, job):
 		t_1 = time.time()
@@ -74,13 +76,13 @@ class Scheduler(object):
 					break
 					
 				self._try_start()
-				for queue in self._queues:
-					print('max_workers: %d, used_workers: %d' % \
-						(queue._max_workers, queue._used_workers))
+				# for queue in self._queues:
+					# print('max_workers: %d, used_workers: %d' % \
+						# (queue._max_workers, queue._used_workers))
 				t_1 = time.time()
 				# return
 				self._cond.wait()
-				print('elapsed waiting for any job to complete:', time.time() - t_1)
+				# print('elapsed waiting for any job to complete:', time.time() - t_1)
 		
 	def start(self):
 		print('Starting...')
@@ -126,10 +128,11 @@ class Job(object):
 		for a in args:
 			if isinstance(a, Job):
 				self.add_dependency(a)
-		self._orig_queue = queue
+		self._resources = (kwargs['resources'] if 'resources' in kwargs else {})
+		# self._orig_queue = queue
 		self._hold = (kwargs['hold'] if 'hold' in kwargs else False)
 		self._release = _mklist(kwargs['release'] if 'release' in kwargs else [])
-		self._forward_to = (kwargs['forward_to'] if 'forward_to' in kwargs else None)
+		# self._forward_to = (kwargs['forward_to'] if 'forward_to' in kwargs else None)
 		for rj in self._release:
 			self.add_dependency(rj)
 		if 'after' in kwargs:
@@ -160,14 +163,19 @@ class Job(object):
 		
 		
 class Queue(object):
-	def __init__(self, sch):
+	def __init__(self, sch, **kwargs):
+		self._max_workers = kwargs['max_workers'] \
+			if 'max_workers' in kwargs else cpu_count()
 		self._sch = sch
 		sch._queues.append(self)
 		self._used_workers = 0
+		self._resources = kwargs['resources'] \
+			if 'resources' in kwargs else {}
+		self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
 		
-	def has_free_workers(self):
-		with self._sch._lock:
-			return (self._used_workers < self._max_workers)
+	# def has_free_workers(self):
+		# with self._sch._lock:
+			# return (self._used_workers < self._max_workers)
 		
 	def submit(self, runnable, *args, **kwargs):
 		job = Job(self, runnable, *args, **kwargs)
@@ -187,7 +195,7 @@ class Queue(object):
 		
 	def wrap(self, job):
 		def wrapped(*args):
-			print('wrapped(): ENTER, args:', args)
+			# print('wrapped(): ENTER, args:', args)
 			cond = self._sch._cond
 			
 			if job._sub_jobs is not None: # multiple result job
@@ -219,40 +227,65 @@ class Queue(object):
 			t_1 = time.time()
 			with cond:
 				elapsed = time.time() - t_1
-				print('elapsed:', elapsed)
+				# print('elapsed:', elapsed)
 				for rj in job._release:
-					rj._orig_queue._used_workers -= 1
+					rj._queue.free_resources(rj) # rj._orig_queue._used_workers -= 1
 				if not job._hold:
-					self._used_workers -= 1
+					self.free_resources(job) # self._used_workers -= 1
 				job._status = sta
 				job._result = res
 				cond.notify()
 			
-			print('wrapped(): EXIT')
+			# print('wrapped(): EXIT')
 			return res
 		return wrapped
 		
 	def start(self, job):
 		t_1 = time.time()
 		with self._sch._lock:
-			print('elapsed 3:', time.time() - t_1)
-			if self._used_workers >= self._max_workers:
-				raise ValueError('Attempting to start a job on full queue')
-			if job._forward_to is not None:
+			# print('elapsed 3:', time.time() - t_1)
+			# if not self.has_free_workers(): # _used_workers >= self._max_workers:
+				# raise ValueError('Attempting to start a job on full queue')
+			if not self.has_resources(job):
+				raise ValueError('Attempting to start a job on a queue without necessary resources')
+			# if job._forward_to is not None:
 				# job._orig_queue = job._queue
-				job._queue = job._forward_to
-				job._forward_to = None
-				if job._hold:
-					self._used_workers += 1
-					job._hold = False
-			else:
+				# job._queue = job._forward_to
+				# job._forward_to = None
+				# if job._hold:
+					# self.take_resources(job) # _used_workers += 1
+					# job._hold = False
+			# else:
 				# if job._hold:
 					# job._orig_queue._used_workers += 1
-				job._status = _RUNNING
-				self._used_workers += 1
-				t_1 = time.time()
-				job._promise = self._executor.submit(self.wrap(job), *job.extract_args())
-				print('elapsed 4:', time.time() - t_1)
+			job._status = _RUNNING
+			self.take_resources(job) # self._used_workers += 1
+			t_1 = time.time()
+			job._promise = self._executor.submit(self.wrap(job), *job.extract_args())
+			# print('elapsed 4:', time.time() - t_1)
+				
+	def has_resources(self, job):
+		if self._used_workers >= self._max_workers:
+			return False
+			
+		if job._resources is None:
+			return True
+			
+		for (k, v) in job._resources.items():
+			if self._resources[k] < v:
+				return False
+				
+		return True
+		
+	def take_resources(self, job):
+		self._used_workers += 1
+		for (k, v) in job._resources.items():
+			self._resources[k] -= v
+			
+	def free_resources(self, job):
+		self._used_workers -= 1
+		for (k, v) in job._resources.items():
+			self._resources[k] += v
 		
 		
 class Executor(object):
