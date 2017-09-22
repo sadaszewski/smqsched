@@ -126,10 +126,12 @@ class Job(object):
 		for a in args:
 			if isinstance(a, Job):
 				self.add_dependency(a)
-		self._orig_queue = None
+		self._orig_queue = queue
 		self._hold = (kwargs['hold'] if 'hold' in kwargs else False)
 		self._release = _mklist(kwargs['release'] if 'release' in kwargs else [])
 		self._forward_to = (kwargs['forward_to'] if 'forward_to' in kwargs else None)
+		for rj in self._release:
+			self.add_dependency(rj)
 		if 'after' in kwargs:
 			after = _mklist(kwargs['after'])
 			# if not isinstance(after, Iterable): after = [after]
@@ -194,7 +196,8 @@ class Queue(object):
 					try:
 						res = next(gen)
 						sta = _FINISHED
-					except:
+					except Exception as e:
+						print(e)
 						res = None
 						sta = _FAILED
 				
@@ -208,7 +211,8 @@ class Queue(object):
 				try:
 					res = job._runnable(*args)
 					sta = _FINISHED
-				except:
+				except Exception as e:
+					print(e)
 					res = None
 					sta = _FAILED
 			
@@ -235,7 +239,7 @@ class Queue(object):
 			if self._used_workers >= self._max_workers:
 				raise ValueError('Attempting to start a job on full queue')
 			if job._forward_to is not None:
-				job._orig_queue = job._queue
+				# job._orig_queue = job._queue
 				job._queue = job._forward_to
 				job._forward_to = None
 				if job._hold:
