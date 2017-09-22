@@ -3,17 +3,19 @@
 #
 
 from threading import Thread, RLock, Condition
-# from concurrent.futures import ThreadPoolExecutor, \
+from concurrent.futures import ThreadPoolExecutor
 	# ProcessPoolExecutor
 import os
 import time
 import numpy as np
+from collections import Iterable
 
 
 _WAITING = 0
 _RUNNING = 1
 _FINISHED = 2
 _FAILED = 3
+# _HOLDING = 4
 
 
 class Scheduler(object):
@@ -103,8 +105,14 @@ class Scheduler(object):
 		return self._thr.isAlive()
 		
 		
+def _mklist(a):
+	if isinstance(a, Iterable):
+		return a
+	return [a]
+		
+		
 class Job(object):
-	def __init__(self, queue, runnable, *args):
+	def __init__(self, queue, runnable, *args, **kwargs):
 		# print('Job(), args:', args)
 		self._queue = queue
 		self._parents = []
@@ -117,6 +125,15 @@ class Job(object):
 		self._sub_jobs = None
 		for a in args:
 			if isinstance(a, Job):
+				self.add_dependency(a)
+		self._orig_queue = None
+		self._hold = (kwargs['hold'] if 'hold' in kwargs else False)
+		self._release = _mklist(kwargs['release'] if 'release' in kwargs else [])
+		self._forward_to = (kwargs['forward_to'] if 'forward_to' in kwargs else None)
+		if 'after' in kwargs:
+			after = _mklist(kwargs['after'])
+			# if not isinstance(after, Iterable): after = [after]
+			for a in after:
 				self.add_dependency(a)
 		
 	def add_dependency(self, par):
@@ -135,6 +152,10 @@ class Job(object):
 	def result(self):
 		return self._result
 		
+	def release(self):
+		if self._state == _HOLDING:
+			self._state = _FINISHED
+		
 		
 class Queue(object):
 	def __init__(self, sch):
@@ -146,11 +167,11 @@ class Queue(object):
 		with self._sch._lock:
 			return (self._used_workers < self._max_workers)
 		
-	def submit(self, runnable, *args):
-		job = Job(self, runnable, *args)
+	def submit(self, runnable, *args, **kwargs):
+		job = Job(self, runnable, *args, **kwargs)
 		self._sch.add_job(job)
 		
-		if 'number_of_results' in runnable.__dict__: # multiple results job
+		if hasattr(runnable, 'number_of_results'): # multiple results job
 			n = runnable.number_of_results(*args)
 			sub_jobs = [None] * n
 			for i in range(n): # generator will be called n times
@@ -195,7 +216,10 @@ class Queue(object):
 			with cond:
 				elapsed = time.time() - t_1
 				print('elapsed:', elapsed)
-				self._used_workers -= 1
+				for rj in job._release:
+					rj._orig_queue._used_workers -= 1
+				if not job._hold:
+					self._used_workers -= 1
 				job._status = sta
 				job._result = res
 				cond.notify()
@@ -210,11 +234,21 @@ class Queue(object):
 			print('elapsed 3:', time.time() - t_1)
 			if self._used_workers >= self._max_workers:
 				raise ValueError('Attempting to start a job on full queue')
-			job._status = _RUNNING
-			self._used_workers += 1
-			t_1 = time.time()
-			job._promise = self._executor.submit(self.wrap(job), *job.extract_args())
-			print('elapsed 4:', time.time() - t_1)
+			if job._forward_to is not None:
+				job._orig_queue = job._queue
+				job._queue = job._forward_to
+				job._forward_to = None
+				if job._hold:
+					self._used_workers += 1
+					job._hold = False
+			else:
+				# if job._hold:
+					# job._orig_queue._used_workers += 1
+				job._status = _RUNNING
+				self._used_workers += 1
+				t_1 = time.time()
+				job._promise = self._executor.submit(self.wrap(job), *job.extract_args())
+				print('elapsed 4:', time.time() - t_1)
 		
 		
 class Executor(object):
@@ -230,7 +264,7 @@ class AcquisitionQueue(Queue):
 	def __init__(self, sch):
 		super(AcquisitionQueue, self).__init__(sch)
 		self._max_workers = 1
-		self._executor = Executor()
+		self._executor = ThreadPoolExecutor(max_workers=1)
 		
 	def hline(pos, width=0):
 		pass
@@ -243,7 +277,7 @@ class ProcessingQueue(Queue):
 	def __init__(self, sch):
 		super(ProcessingQueue, self).__init__(sch)
 		self._max_workers = 8
-		self._executor = Executor()
+		self._executor = ThreadPoolExecutor(max_workers=8)
 
 		
 def _compute_square(i):
